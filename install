@@ -1,0 +1,11 @@
+#!/bin/bash
+if [ "root" != "$USER" ]; then
+	echo "Instalation requires root previleges"
+	exit
+fi
+echo "#!/bin/bash" > /usr/bin/ssf
+echo "exec \"$(pwd)/ssf\" $(pwd)  \${1+\"\$@\"}" >> /usr/bin/ssf
+#printf "(cd $(pwd) && exec ./ssf_server\${1+\"\$@\"})" >> /usr/bin/ssf_server
+ln -Pf ./ssf_server /usr/bin/ssfs
+chmod +x /usr/bin/ssf
+

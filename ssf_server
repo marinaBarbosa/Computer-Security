@@ -1,0 +1,149 @@
+#!/usr/bin/python
+# Echo server program
+# needs python-tk package
+from Tkinter import *
+import tkMessageBox
+window = Tk()
+window.wm_withdraw()
+
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import AES
+from Crypto.PublicKey import RSA
+from Crypto import Random
+from os import chmod
+from base64 import b64encode
+from base64 import b64decode
+import os
+import sys
+import socket
+import errno
+import hmac
+import hashlib
+from os import chmod
+from Crypto.PublicKey import RSA
+import re
+
+def trustpubkey(pubkey):
+	file = open("known_senders", "a")
+	file.write(pubkey+"\n")
+	file.close()
+def findmailkey(mail):
+	try:
+		file = open("known_senders", "r")
+	except:
+		return ""
+
+	for line in file:
+		if re.search(mail, line):
+			file.close()
+			return line
+	file.close()
+	return ""
+def encryptkey(sessionkey,key):
+	cipher = PKCS1_OAEP.new(key)
+	encrypted = cipher.encrypt(sessionkey)
+	encrypted = b64encode(encrypted)
+	print('File encrypted')
+	return encrypted
+def unpad(s):
+	return s[:-ord(s[len(s)-1:])]
+
+HOST = ''   
+if len(sys.argv)>1:
+	PORT = int(sys.argv[1])
+else:
+	PORT = 5430 
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind((HOST, PORT))
+s.listen(1)
+try:
+	while 1:
+		sessionkey = Random.new().read(16)
+		conn, addr = s.accept()
+		cipherkey = ''
+		ciphertext = ''
+		print('Connected with', addr)
+		public_key = conn.recv(1023)
+		email = public_key.split(" ").pop()
+		trusted_key = findmailkey(email)
+		#print(trusted_key)
+		#print(public_key)
+		if trusted_key=="" or trusted_key.strip()!=public_key.strip():
+			res = tkMessageBox.askquestion("Accept public key?","Proclaimed email '%s' \
+from ip %s is trying to connect with you, but\
+there is no record of it. Trust his public key?" % (email, addr[0]))
+			if res != "yes":
+				conn.send("declined")
+				window.deiconify()
+				window.wm_withdraw()
+				continue
+			window.deiconify()
+			window.wm_withdraw()
+			trustpubkey(public_key)
+
+		public_key = RSA.importKey(public_key)
+		print 'Received key'
+		sessionkey_OAEP = encryptkey(sessionkey,public_key)
+		print "Sending session key: "
+		conn.send(sessionkey_OAEP) 
+		enc = conn.recv(1024) == "enc"
+		name = conn.recv(1024)
+		print 'name: ',name
+		
+		res = tkMessageBox.askquestion("Recieve %sEncrypted File "%(enc if "" else "Non-"), "Trusted email: %s from\
+ip %s is trying to send you %s, save?"
+				% (email, addr[0], name))
+		if res != "yes":
+			conn.send("declined")
+			window.deiconify()
+			window.wm_withdraw()
+			continue
+		conn.send('next')
+		window.deiconify()
+		window.wm_withdraw()
+
+		data = conn.recv(1023)
+
+		if enc:
+			iv = data
+			print 'Iv recieved'	
+		else:
+			filehashC = data # file hash client
+			print 'Hash recieved'	
+		conn.send('next')
+		print("Recieving file:")
+		while 1:
+			data = conn.recv(512)
+			if not data: break
+			sys.stdout.write(".")
+			ciphertext = ciphertext + data
+			conn.send('next')
+		print "\nFile recieved"
+
+		if enc:
+			print "Decrypting..."
+			cipher = AES.new(sessionkey , AES.MODE_CBC, iv)
+			ciphertext = b64decode(ciphertext)
+			message = cipher.decrypt(ciphertext)
+			message = unpad(message)
+		else: 
+			message = ciphertext
+			#filehashR = hashlib.md5(sessionkey+message).hexdigest()
+			filehashR = hmac.new(sessionkey,message,hashlib.md5).digest()
+			# real filehash
+			if filehashC != filehashR:
+				print "Source not verified"
+				continue
+			print "Source verified"
+		fileout = open('files/'+name,"w")
+		fileout.write(message)
+		conn.send("Success")
+		print "Success"
+
+		conn.close()
+		fileout.close()
+except:
+	print 'Server closing'
+
+
+

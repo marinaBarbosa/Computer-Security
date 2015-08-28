@@ -1,0 +1,219 @@
+#!/usr/bin/python
+# client program
+from Crypto.PublicKey import RSA
+from base64 import b64encode
+from base64 import b64decode
+from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import AES
+from Crypto import Random
+import socket
+import subprocess
+import os
+import sys
+import errno
+import hashlib
+import hmac
+from os import chmod
+from zipfile import ZipFile
+import psutil
+
+
+def make_sure_path_exists(path):
+    try:
+        os.makedirs(path)
+    except OSError as exception:
+        if exception.errno != errno.EEXIST:
+            raise
+def gen_RSA(bits=2048):
+	print('generating keys')
+	key = RSA.generate(bits)
+	with open(maindir+"/keys/private.pem", 'w') as content_file:
+		chmod(maindir+"/keys/private.pem", 0600) # read and write
+		content_file.write(key.exportKey('PEM'))
+	pubkey = key.publickey()
+	email = raw_input("Keys have not been generated\nYour email: ")
+	with open(maindir+"/keys/public.pem", 'w') as content_file:
+		content_file.write(pubkey.exportKey('OpenSSH'))
+		content_file.write(" "+email)
+	print('keys generated')
+
+def zipdir(path, zipf):
+	for root, dirs, files in os.walk(path):
+		for file in files:
+			zipf.write(os.path.join(root, file))
+def parseArgs(args, accepted):
+	result = []
+	l = len(args)
+	j = 0
+	for i in range(0,len(accepted)):
+		result.append(False)
+	while j<l:
+		for i in range(0,len(accepted)):
+			if args[j]=="--"+accepted[i][0] or args[j]=="-"+accepted[i][1]:
+				result[i]=True
+				args.pop(j)
+				j=j-1
+				l=l-1
+				break
+		j=j+1
+	return result
+def pad(s, bs):
+	return s + (bs - len(s) % bs) * chr(bs - len(s) % bs)
+def encrypt(text,key,iv):
+	text = pad(text,32)
+	cipher = AES.new(key,AES.MODE_CBC,iv)
+	encrypted = cipher.encrypt(text)
+	encrypted = b64encode(encrypted)
+	return encrypted
+def chunks(lst, n):
+	for i in xrange(0, len(lst), n):
+		yield lst[i:i+n]
+def stopServer():
+	print("Stopping server")
+	PROCNAME = "ssfs"
+	for proc in psutil.process_iter():
+		if proc.name == PROCNAME or proc.name == PROCNAME+".exe":
+			proc.kill()
+			return True
+	return False
+argv = sys.argv
+argv.pop(0)#Remove program name
+maindir = argv.pop(0)
+param = [("zip","z","Compress file before sending."),
+  ("encrypt","e","Encrypt file before sending."),
+  ("init","i","Start receive service."),
+  ("kill","k","Stop service."),
+  ("help","h","Show this message and exit.")  
+ ]
+tags = parseArgs(argv,param)
+
+if tags[3] or tags[2]:
+	if stopServer():
+		print("Server stopped")
+	else:
+		print("Server not found")
+if tags[2]:
+	subprocess.Popen(["/bin/bash","-c","exec ssfs"])
+	print("Server started")
+if tags[3] or tags[2]:
+	sys.exit()
+if tags[4]:
+	print("List accepted arguments:")
+	for par in param:
+		print("\t-"+par[1]+", --"+par[0]+"\t"+par[2])
+	sys.exit()
+
+make_sure_path_exists(maindir+"/keys")
+if not (os.path.exists(maindir+"/keys/private.pem") and os.path.exists(maindir+"/keys/public.pem")):
+	gen_RSA()
+public_key = open(maindir+"/keys/public.pem").read()
+email = public_key.split(" ").pop()
+private_key = open(maindir+"/keys/private.pem").read()
+key = RSA.importKey(private_key)
+
+if len(argv):
+	arg = argv.pop(0)
+	HOSTPORT = arg.split(':')
+	if len(HOSTPORT)==1:
+		HOSTPORT.append(5430)
+	elif len(HOSTPORT)==2:
+		HOSTPORT[1] = int(HOSTPORT[1])
+	if len(argv):
+		FILENAME  = argv.pop(0)
+else:
+	HOSTPORT = raw_input("Remote IP (port optional):").split(':')
+	if len(HOSTPORT)==1:
+		HOSTPORT.append(54030)
+	elif len(HOSTPORT)==2:
+		HOSTPORT[1] = int(HOSTPORT[1])
+	FILENAME = raw_input("File to send: ")
+
+
+if os.path.isdir(FILENAME) and not tags[0]:
+	print("Directory files must be zipped with -z")
+	sys.exit()
+if tags[0]:
+	while FILENAME.endswith('/'):
+		FILENAME = FILENAME[:-1]
+	name = FILENAME+".zip"
+	try:
+		zipf = ZipFile(name, 'w')
+		if os.path.isdir(FILENAME):
+			zipdir(FILENAME,zipf)
+		else:
+			zipf.write(FILENAME)
+		zipf.close()
+	except:
+		print("Could not zip file")
+	FILENAME = name
+
+name=FILENAME.split('/').pop()
+
+try:
+	s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+	s.connect((HOSTPORT[0], HOSTPORT[1]))
+except:
+	print('Connection could not be established')
+	sys.exit()
+try:
+	filein = open(FILENAME,"r")
+except:
+	print("File could not be opened")
+	sys.exit()
+if not filein:
+	print("File could not be opened")
+	sys.exit()
+
+iv = Random.new().read(16)
+
+############## START SEND
+
+print 'Sending public key'
+s.send(public_key)
+print('Recieving session key:')
+cipherkey =  s.recv(1024)
+if cipherkey=="declined":
+	print('Reciever does not trust you.')
+	sys.exit()
+
+print('Session key recieved')
+if tags[1]:
+	s.send("enc")
+else:
+	s.send("raw")
+print("Sending name", name)
+s.send(name)
+
+data = s.recv(1023)
+if data == "declined":
+	print('Reciever declined')
+	sys.exit()
+
+cipher = PKCS1_OAEP.new(key)
+cipherkey = b64decode(cipherkey)
+sessionkey = cipher.decrypt(cipherkey)
+
+text = filein.read()
+#filehash = hashlib.md5(sessionkey+text).hexdigest()
+filehash = hmac.new(sessionkey,text,hashlib.md5).digest()
+filein.close()
+if tags[0]:
+	os.remove(FILENAME)
+if tags[1]:
+	text = encrypt(text,sessionkey,iv)
+	print("Sending iv")
+	s.send(iv) 
+else:
+	s.send(filehash)
+
+data = s.recv(1023)
+print("Sending file:")
+for chunk in chunks(text, 10):
+	sys.stdout.write(".")
+	s.send(chunk)
+	data = s.recv(1023)
+
+print("\nFile sent")
+
+s.close()
+
